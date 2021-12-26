@@ -4,8 +4,12 @@ import numpy as np
 from threading import Thread
 import time
 
-# 该阈值主要是根据v值进行筛选
-light_lower_hsv = np.array([112, 74, 140])  # hsv过滤范围最小值
+# 该阈值根据红光照在蓝色立方体上亮度会降低，而放宽了v值，但对h和s多了限制。
+hsv_lower_hsv = np.array([112, 74, 140])  # hsv过滤范围最小值
+hsv_upper_hsv = np.array([180, 255, 255])  # hsv过滤范围最大值
+
+# 该阈值主要是根据v值进行筛选(pane使用)
+light_lower_hsv = np.array([0, 0, 200])  # hsv过滤范围最小值
 light_upper_hsv = np.array([180, 255, 255])  # hsv过滤范围最大值
 
 FILEPATH = os.path.dirname(os.path.abspath(__file__))  # 获取当前py文件的路径
@@ -16,6 +20,8 @@ class Cap:
     """获取摄像头捕获与三维重构计算体积的核心类，视频测试类"""
     def __init__(self):
         self.pane = None  # 存放固定的pane文件，cv2读取的图片，相当于本来的simage
+        self.pane_canny = None  # debug需要，canny运算后得到的图像
+        self.pane_2d_iamge = None  # debug需要
         self.pane_2d = None  # 存放pane的2d点列阵
         self.pane_3d = None  # 存放pane的3d点列阵
         self.pane_size = None  # 点的数量(其实就是pane_2d的行数)
@@ -107,6 +113,14 @@ class Cap:
                     break
         return midp2d
 
+    @staticmethod
+    # 2d点坐标，生成图像方便调试
+    def _2d_to_image(points: np.ndarray):
+        _temp = np.zeros((540, 960), dtype=np.uint8)
+        for each in points:
+            _temp[int(each[1])][int(each[0])] = 255
+        return _temp
+
     # 该函数接收彩色原图，首先进行hvs阈值提取光条纹
     def set_pane(self, image: np.ndarray):
         hsv_frame = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)  # 转换为hvs模型
@@ -120,14 +134,14 @@ class Cap:
     def set_pane_gray(self, pane: np.ndarray) -> None:
         self.pane = pane
         _pane = cv2.medianBlur(self.pane, 5)  # 中值滤波
-        _pane = cv2.Canny(_pane, 60, 180, apertureSize=3, L2gradient=False)  # Canny检测边缘
+        self.pane_canny = cv2.Canny(_pane, 60, 180, apertureSize=3, L2gradient=False)  # Canny检测边缘
 
-        self.pane_2d = self._get_light_mid(_pane, self.p1, self.p2)
+        self.pane_2d = self._get_light_mid(self.pane_canny, self.p1, self.p2)
         self.pane_3d = self._get_3d_points(self.linepen, self.pane_2d)
 
         print("[DEBUG][SET_PANE]2d 0: u = %f v = %f " % (self.pane_2d[0, 0], self.pane_2d[0, 1]))
         print("[DEBUG][SET_PANE]3d 0: x = %f y = %f z = %f " % (self.pane_3d[0, 0], self.pane_3d[0, 1], self.pane_3d[0, 2]))
-
+        self.pane_2d_iamge = self._2d_to_image(self.pane_2d)
         self.pane_size = self.pane_2d.shape[0] - 1
         # dx好像是光条纹的宽度
         self._2d_light_points_dx = self._get_distance(self.pane_3d[0], self.pane_3d[self.pane_size - 1]) / self.pane_size  # ？？为什么是这样得到dx
@@ -207,21 +221,21 @@ class Cap:
 
             # DEBUG
             cv2.imshow('video', image)
-            cv2.imshow('pane', self.pane)
+            cv2.imshow('pane_2d_image', self.pane_2d_iamge)
+
             image_hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(image_hsv, lowerb=light_lower_hsv, upperb=light_upper_hsv)
+            mask = cv2.inRange(image_hsv, lowerb=hsv_lower_hsv, upperb=hsv_upper_hsv)
             image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             image_gray_masked = cv2.bitwise_and(image_gray, image_gray, mask=mask)  # 过滤范围内的部分
 
-            cv2.imshow('image_gray_masked', image_gray_masked)
             cv2.waitKey(1)
             dimage = cv2.medianBlur(image_gray_masked, 5)  # 中值滤波
             dimage = cv2.Canny(dimage, 60, 180, apertureSize=3, L2gradient=False)  # Canny检测边缘
 
-            cv2.imshow('canny', dimage)
             midt2d = self._get_light_mid(dimage, self.p1, self.p2)
             midt3d = self._get_3d_points(self.linepen, midt2d)
 
+            cv2.imshow('midt2d_image', self._2d_to_image(midt2d))
             # tsize = midt2d.shape[0] - 1  # tsize似乎不起作用
             # count = pcount = mcount = 0
             # 循环计算3d距离
@@ -260,10 +274,9 @@ class Cap:
             # 计算截面积
             area = 0
             for i in range(self.pane_size):
-                if distan[i][0] < 8:
+                if distan[i][0] < 10:
                     distan[i][0] = 0
                 area = area + distan[i][0]
-
             area = self._2d_light_points_dx * area * 0.8916252
             print("[DEBUG][LOOP_TEST]area:", area)
             # 计算这一帧图像所用时间物体走过的路程( m/s * ms / 1000)
